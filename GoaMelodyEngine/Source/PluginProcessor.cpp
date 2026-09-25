@@ -75,14 +75,66 @@ void MonoSynth::render (float* L, float* R, int n, float gain)
 GoaProcessor::GoaProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
-    for (auto& s : slots) s = std::make_shared<const goa::Pattern> (goa::generate (params, newSeed()));
+    for (auto& s : slots) s = std::make_shared<const goa::Pattern> (goa::generateBest (params, newSeed()));
     publish();
     pending.reserve (256);
     events.reserve (1024);
     startTimerHz (2);
 }
 
-GoaProcessor::~GoaProcessor() { stopTimer(); }
+GoaProcessor::~GoaProcessor()
+{
+    stopTimer();
+    const juce::SpinLock::ScopedLockType sl (outLock);
+    if (extOut != nullptr) extOut->sendMessageNow (juce::MidiMessage::allNotesOff (1));
+    extOut.reset();
+}
+
+juce::StringArray GoaProcessor::availableMidiOuts() const
+{
+    juce::StringArray names;
+   #if JUCE_MAC || JUCE_LINUX
+    names.add (virtualPortName());
+   #endif
+    for (auto& d : juce::MidiOutput::getAvailableDevices()) names.addIfNotAlreadyThere (d.name);
+    return names;
+}
+
+void GoaProcessor::setMidiOut (const juce::String& name)
+{
+    std::unique_ptr<juce::MidiOutput> dev;
+    if (name.isNotEmpty())
+    {
+       #if JUCE_MAC || JUCE_LINUX
+        if (name == virtualPortName()) dev = juce::MidiOutput::createNewDevice ("Goa Melody Engine");
+       #endif
+        if (dev == nullptr)
+            for (auto& d : juce::MidiOutput::getAvailableDevices())
+                if (d.name == name) { dev = juce::MidiOutput::openDevice (d.identifier); break; }
+        if (dev != nullptr) dev->startBackgroundThread();
+        else lastMessage = "Could not open the MIDI port " + name + ". Is it in use or disconnected?";
+    }
+    {
+        const juce::SpinLock::ScopedLockType sl (outLock);
+        std::swap (extOut, dev);
+    }
+    if (dev != nullptr) dev->sendMessageNow (juce::MidiMessage::allNotesOff (1)); // old port: release hanging notes
+    midiOutName = extOut != nullptr ? name : juce::String();
+    ++modelVersion;
+}
+
+void GoaProcessor::sendExternal (const juce::MidiBuffer& midi)
+{
+    if (midi.isEmpty()) return;
+    const juce::SpinLock::ScopedTryLockType sl (outLock);
+    if (sl.isLocked() && extOut != nullptr)
+        extOut->sendBlockOfMessages (midi, juce::Time::getMillisecondCounterHiRes(), sampleRate);
+}
+
+void GoaProcessor::startListening()
+{
+    if (! hostIsPlaying.load()) internalPlay = true;
+}
 
 bool GoaProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
@@ -132,11 +184,13 @@ void GoaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
 
     bool running = false, internalClock = false;
     double start = 0.0;
-    if (hostPlaying && havePpq && followHost.load())
+    hostIsPlaying.store (hostPlaying);
+    if (hostPlaying && havePpq)
     {
         running = true;
         start = ppq;
         wasInternal = false;
+        internalPlay.store (false);
     }
     else if (internalPlay.load())
     {
@@ -158,6 +212,7 @@ void GoaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
         wasRunning = false;
         playStep.store (-1);
         if (preview) synth.render (L, R, n, gain); // let the last note release
+        sendExternal (midi);
         return;
     }
 
@@ -229,6 +284,7 @@ void GoaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
     }
     if (preview && pos < n) synth.render (L + pos, R != nullptr ? R + pos : nullptr, n - pos, gain);
 
+    sendExternal (midi);
     if (internalClock) internalPpq = end;
     lastEnd = end;
     wasRunning = true;
@@ -278,7 +334,7 @@ void GoaProcessor::generateAll()
     for (int i = 0; i < 8; ++i) if (! keep[(size_t) i]) freeSlots.push_back (i);
     if (freeSlots.empty()) { lastMessage = "All eight are kept. Unkeep one to make room."; ++modelVersion; return; }
     pushHistory();
-    for (int i : freeSlots) slots[(size_t) i] = std::make_shared<const goa::Pattern> (goa::generate (params, newSeed()));
+    for (int i : freeSlots) slots[(size_t) i] = std::make_shared<const goa::Pattern> (goa::generateBest (params, newSeed()));
     if (keep[(size_t) sel]) sel = freeSlots.front();
     publish();
     lastMessage = {};
@@ -330,7 +386,7 @@ void GoaProcessor::generateSimilar()
     for (int i : freeSlots)
     {
         const auto m = goa::dnaMotif (d, r);
-        auto p = goa::generate (params, newSeed(), &m, &d.style, &d.rhythms);
+        auto p = goa::generateBest (params, newSeed(), 4, &m, &d.style, &d.rhythms);
         p.origin = "Similar to " + dnaName.upToLastOccurrenceOf (".", false, false).toStdString();
         slots[(size_t) i] = std::make_shared<const goa::Pattern> (std::move (p));
     }
@@ -419,6 +475,7 @@ void GoaProcessor::getStateInformation (juce::MemoryBlock& dest)
     t.setProperty ("gain", (double) previewGain.load(), nullptr);
     t.setProperty ("follow", followHost.load(), nullptr);
     t.setProperty ("bpm", internalBpm.load(), nullptr);
+    t.setProperty ("midiOut", midiOutName, nullptr);
     for (int i = 0; i < 8; ++i) putString (t, juce::Identifier ("slot" + juce::String (i)), goa::serialize (*slots[(size_t) i]));
     if (auto xml = t.createXml()) copyXmlToBinary (*xml, dest);
 }
@@ -444,6 +501,8 @@ void GoaProcessor::setStateInformation (const void* data, int size)
     previewGain = (float) (double) t.getProperty ("gain", 0.5);
     followHost = (bool) t.getProperty ("follow", true);
     internalBpm = (double) t.getProperty ("bpm", 145.0);
+    const juce::String out = t.getProperty ("midiOut", "").toString();
+    if (out != midiOutName) setMidiOut (out);
     history.clear();
     publish();
     ++modelVersion;

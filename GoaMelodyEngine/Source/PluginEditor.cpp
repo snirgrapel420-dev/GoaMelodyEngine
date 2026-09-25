@@ -174,7 +174,7 @@ void SlotView::paint (juce::Graphics& g)
 void SlotView::mouseUp (const juce::MouseEvent& e)
 {
     if (heartArea().contains (e.position)) proc.toggleKeep (idx);
-    else proc.select (idx);
+    else { proc.select (idx); proc.startListening(); } // click to hear
 }
 
 // ================= BigRoll =================
@@ -261,7 +261,7 @@ void MidiDragSource::paint (juce::Graphics& g)
     g.drawRoundedRectangle (b, 6.0f, 1.5f);
     g.setFont (font (13.5f, true));
     g.setColour (ink);
-    g.drawText (dragging ? "Drop it on a MIDI track" : "Drag MIDI into your DAW", b, juce::Justification::centred);
+    g.drawText (dragging ? "Drop it on a MIDI track" : "Drag MIDI to a track", b, juce::Justification::centred);
 }
 
 void MidiDragSource::mouseDrag (const juce::MouseEvent& e)
@@ -291,20 +291,45 @@ juce::Label& GoaEditor::makeLabel (juce::Label& l, const juce::String& text, boo
     return l;
 }
 
+static juce::String modeDescription (goa::Mode m)
+{
+    switch (m)
+    {
+        case goa::Mode::Acid: return "303-style bassline with accents and slides.";
+        case goa::Mode::Arp: return "Arpeggio that walks through your chords.";
+        case goa::Mode::Chords: return "Melody that changes with your chords.";
+        default: return "Lead line built from one short motif.";
+    }
+}
+static juce::String styleDescription (const std::string& s)
+{
+    if (s == "Acid") return "Syncopated, more rests, accents and slides.";
+    if (s == "Hypnotic") return "2-3 note motif repeated almost unchanged.";
+    if (s == "Emotional") return "Longer notes, stepwise, singable.";
+    if (s == "Dark") return "Low, heavy root pedal, narrow steps.";
+    if (s == "Cosmic") return "High, wide leaps and open 5ths.";
+    if (s == "90s Goa") return "Constant rolling 16ths over a strong root pedal.";
+    if (s == "Modern Goa") return "Off-beat syncopation and gaps, punchier.";
+    return "Rolling 16ths, 4-5 note motif over the root.";
+}
+
 GoaEditor::GoaEditor (GoaProcessor& p) : AudioProcessorEditor (&p), proc (p), bigRoll (p), dragSrc (p)
 {
     setLookAndFeel (&lnf);
 
     makeLabel (title, "Goa Melody Engine", false).setFont (font (24.0f, true));
     makeLabel (modeL, "Mode");
+    makeLabel (modeHelp, "").setFont (font (11.5f));
     makeLabel (rootL, "Root");
     makeLabel (scaleL, "Scale");
     makeLabel (styleL, "Style");
+    makeLabel (styleHelp, "").setFont (font (11.5f));
     makeLabel (chordsL, "Chords (one per bar)");
     makeLabel (barsL, "Phrase length (bars)");
-    makeLabel (rateL, "Rate");
+    makeLabel (rateL, "Note grid");
     makeLabel (scaleNotes, "", false).setFont (font (13.0f, true));
     scaleNotes.setColour (juce::Label::textColourId, juce::Colour (0xffddff4a));
+    scaleNotes.setTooltip ("The notes of the chosen scale, starting from the root.");
 
     const char* modeNames[4] = { "Melody", "Acid", "Arp", "Chords" };
     for (int i = 0; i < 4; ++i)
@@ -313,6 +338,7 @@ GoaEditor::GoaEditor (GoaProcessor& p) : AudioProcessorEditor (&p), proc (p), bi
         b.setButtonText (modeNames[i]);
         b.setClickingTogglesState (true);
         b.setRadioGroupId (1001);
+        b.setTooltip (modeDescription ((goa::Mode) i) + " Applies on the next Generate.");
         b.onClick = [this, i] { if (modeBtns[(size_t) i].getToggleState()) { proc.params.mode = (goa::Mode) i; ++proc.modelVersion; } };
         addAndMakeVisible (b);
     }
@@ -359,33 +385,36 @@ GoaEditor::GoaEditor (GoaProcessor& p) : AudioProcessorEditor (&p), proc (p), bi
     for (size_t i = 0; i < styles.size(); ++i) styleBox.addItem (juce::String (styles[i]), (int) i + 1);
     styleBox.onChange = [this, styles] {
         const int sid = styleBox.getSelectedId();
-        if (sid >= 1 && sid <= (int) styles.size()) proc.params.style = styles[(size_t) sid - 1];
+        if (sid >= 1 && sid <= (int) styles.size()) { proc.params.style = styles[(size_t) sid - 1]; ++proc.modelVersion; }
     };
     addAndMakeVisible (styleBox);
 
     chordsEd.setTextToShowWhenEmpty ("Gm Eb F Dm", dim);
+    chordsEd.setTooltip ("Type chord names separated by spaces, for example Gm Eb F Dm or Am7 Fmaj7.");
     chordsEd.onTextChange = [this] { proc.params.chords = chordsEd.getText().toStdString(); };
     addChildComponent (chordsEd);
 
-    const char* kn[4][3] = { { "Density", "Sparse", "Busy" }, { "Movement", "Static", "Wild" }, { "Register", "Low", "High" }, { "Weirdness", "Human", "Alien" } };
+    const char* kn[4] = { "Density", "Movement", "Register", "Weirdness" };
+    const char* tips[4] = { "How many notes play per beat, and which groove the rhythm uses.",
+                            "How far notes jump, and how much the motif changes when it repeats.",
+                            "How high or low the melody sits.",
+                            "How far the melody may leave the scale. Downbeats always stay in key." };
     for (int i = 0; i < 4; ++i)
     {
         auto& k = knobs[(size_t) i];
-        makeLabel (k.name, kn[i][0]);
+        makeLabel (k.name, kn[i]);
         makeLabel (k.value, "", false);
         k.value.setJustificationType (juce::Justification::centredRight);
-        makeLabel (k.lo, kn[i][1]).setFont (font (11.0f));
-        makeLabel (k.hi, kn[i][2]).setFont (font (11.0f));
-        k.hi.setJustificationType (juce::Justification::centredRight);
+        makeLabel (k.help, "").setFont (font (11.5f));
+        k.help.setJustificationType (juce::Justification::topLeft);
         k.slider.setSliderStyle (juce::Slider::LinearHorizontal);
         k.slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
         k.slider.setRange (0.0, 100.0, 1.0);
+        k.slider.setTooltip (tips[i]);
         k.slider.onValueChange = [this, i] {
             double* f[4] = { &proc.params.density, &proc.params.movement, &proc.params.reg, &proc.params.weird };
             *f[i] = knobs[(size_t) i].slider.getValue() / 100.0;
-            const double v = *f[i];
-            knobs[(size_t) i].value.setText (i == 3 ? (v < .15 ? "Normal" : v < .45 ? "Twisted" : v < .75 ? "Strange" : "Alien")
-                                                    : juce::String ((int) std::lround (v * 100)), juce::dontSendNotification);
+            updateHelpTexts();
         };
         addAndMakeVisible (k.slider);
     }
@@ -397,23 +426,29 @@ GoaEditor::GoaEditor (GoaProcessor& p) : AudioProcessorEditor (&p), proc (p), bi
         b.setButtonText (juce::String (barVals[i]));
         b.setClickingTogglesState (true);
         b.setRadioGroupId (1002);
+        b.setTooltip ("How many bars the melody lasts before it loops.");
         b.onClick = [this, i, v = barVals[i]] { if (barBtns[(size_t) i].getToggleState()) proc.params.bars = v; };
         addAndMakeVisible (b);
     }
     const int rateVals[3] = { 16, 24, 8 };
+    const char* rateTips[3] = { "16th notes: the classic rolling Goa grid.", "16th-note triplets: a swinging, galloping feel.", "8th notes: slower and more open." };
     for (int i = 0; i < 3; ++i)
     {
         auto& b = rateBtns[(size_t) i];
         b.setButtonText (rateText (rateVals[i]));
         b.setClickingTogglesState (true);
         b.setRadioGroupId (1003);
+        b.setTooltip (rateTips[i]);
         b.onClick = [this, i, v = rateVals[i]] { if (rateBtns[(size_t) i].getToggleState()) proc.params.spb = v; };
         addAndMakeVisible (b);
     }
 
+    makeLabel (gridHint, "8 ideas. Click one to hear it. The heart keeps it: Generate replaces the others, Mutate turns them into variations of what you kept.")
+        .setFont (font (12.5f));
     for (int i = 0; i < 8; ++i)
     {
         slotViews[(size_t) i] = std::make_unique<SlotView> (proc, i);
+        slotViews[(size_t) i]->setTooltip ("Click to select and hear. Click the heart to keep it.");
         addAndMakeVisible (*slotViews[(size_t) i]);
     }
 
@@ -426,60 +461,65 @@ GoaEditor::GoaEditor (GoaProcessor& p) : AudioProcessorEditor (&p), proc (p), bi
     rollView.setScrollBarsShown (false, true);
     rollView.setScrollBarThickness (8);
     addAndMakeVisible (rollView);
+    bigRoll.setTooltip ("Click to add or remove a note. Lanes below: velocity, accent, slide.");
     bigRoll.onEdit = [this] (int s, int lane, int v) { editStep (s, lane, v); };
 
+    playBtn.setTooltip ("Hear the selected melody while your DAW is stopped. When the DAW plays, the plugin follows it and stops with it.");
     playBtn.onClick = [this] { proc.internalPlay = ! proc.internalPlay.load(); };
     genBtn.setColour (juce::TextButton::buttonColourId, mag);
     genBtn.setColour (juce::TextButton::textColourOffId, bg);
+    genBtn.setTooltip ("Write new melodies in every slot that is not kept.");
     genBtn.onClick = [this] { proc.generateAll(); };
     mutBtn.setColour (juce::TextButton::buttonColourId, ink);
     mutBtn.setColour (juce::TextButton::textColourOffId, bg);
+    mutBtn.setTooltip ("With kept melodies: fill the other slots with variations of them. With none kept: change the selected melody.");
     mutBtn.onClick = [this] { proc.mutateAction(); };
+    undoBtn.setTooltip ("Go back one step.");
     undoBtn.onClick = [this] { proc.undo(); };
     for (auto* b : { &playBtn, &genBtn, &mutBtn, &undoBtn }) addAndMakeVisible (*b);
 
-    makeLabel (amtL, "Mutation");
+    makeLabel (amtL, "How much to mutate");
     makeLabel (amtHint, "");
     const double amts[4] = { .1, .3, .7, 1.0 };
+    const char* amtTips[4] = { "One small change: a note, an accent or a slide.", "Some rhythm and a few notes change.",
+                               "Keeps the motif, writes a new melody around it.", "A completely new melody." };
     for (int i = 0; i < 4; ++i)
     {
         auto& b = amtBtns[(size_t) i];
         b.setButtonText (juce::String ((int) std::lround (amts[i] * 100)) + "%");
         b.setClickingTogglesState (true);
         b.setRadioGroupId (1004);
+        b.setTooltip (amtTips[i]);
         b.onClick = [this, i, v = amts[i]] { if (amtBtns[(size_t) i].getToggleState()) { proc.amount = v; ++proc.modelVersion; } };
         addAndMakeVisible (b);
     }
 
-    keepBtn.onClick = [this] { proc.toggleKeep (proc.sel); };
-    exportBtn.onClick = [this] {
-        chooser = std::make_unique<juce::FileChooser> ("Save MIDI",
-                                                       juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile (proc.fileBaseFor (proc.sel) + ".mid"), "*.mid");
-        chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
-                              [this] (const juce::FileChooser& fc) {
-                                  auto f = fc.getResult();
-                                  if (f == juce::File()) return;
-                                  const auto data = proc.midiFor (proc.sel);
-                                  proc.lastMessage = f.replaceWithData (data.data(), data.size()) ? "Saved " + f.getFileName() : "Could not write " + f.getFileName();
-                                  ++proc.modelVersion;
-                              });
+    dragSrc.setTooltip ("Drag onto a MIDI track to drop the selected melody in as a clip.");
+    addAndMakeVisible (dragSrc);
+
+    makeLabel (midiOutL, "MIDI out");
+    midiOutBox.setTooltip ("Send the notes to a virtual MIDI port so a synth on another track can play them. "
+                           "On Windows install loopMIDI; on Mac choose the virtual port.");
+    midiOutBox.onChange = [this] {
+        const int sid = midiOutBox.getSelectedId();
+        if (sid == 1) proc.setMidiOut ({});
+        else if (sid == 2) rebuildMidiOutList();
+        else if (sid >= 3 && sid - 3 < midiOutItems.size()) proc.setMidiOut (midiOutItems[sid - 3]);
     };
-    exportKeptBtn.onClick = [this] {
-        chooser = std::make_unique<juce::FileChooser> ("Choose a folder for the kept melodies", juce::File::getSpecialLocation (juce::File::userDocumentsDirectory));
-        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories, [this] (const juce::FileChooser& fc) {
-            auto dir = fc.getResult();
-            if (! dir.isDirectory()) return;
-            int n = 0;
-            for (int i = 0; i < 8; ++i)
-                if (proc.keep[(size_t) i])
-                {
-                    const auto data = proc.midiFor (i);
-                    if (dir.getChildFile (proc.fileBaseFor (i) + ".mid").replaceWithData (data.data(), data.size())) ++n;
-                }
-            proc.lastMessage = "Saved " + juce::String (n) + " MIDI file" + (n == 1 ? "" : "s") + " to " + dir.getFileName();
-            ++proc.modelVersion;
-        });
-    };
+    addAndMakeVisible (midiOutBox);
+    rebuildMidiOutList();
+
+    previewTgl.setTooltip ("The plugin's own synth, so you can hear ideas without routing. Turn it off when your synth plays the notes.");
+    previewTgl.onClick = [this] { proc.previewOn = previewTgl.getToggleState(); };
+    gainSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    gainSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    gainSlider.setRange (0.0, 1.0, 0.01);
+    gainSlider.setTooltip ("Built-in sound volume.");
+    gainSlider.onValueChange = [this] { proc.previewGain = (float) gainSlider.getValue(); };
+    addAndMakeVisible (previewTgl);
+    addAndMakeVisible (gainSlider);
+
+    loadDnaBtn.setTooltip ("Load a MIDI melody you love. The engine measures its intervals, rhythm and phrasing.");
     loadDnaBtn.onClick = [this] {
         chooser = std::make_unique<juce::FileChooser> ("Load a MIDI melody", juce::File::getSpecialLocation (juce::File::userDocumentsDirectory), "*.mid;*.midi");
         chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this] (const juce::FileChooser& fc) {
@@ -487,30 +527,17 @@ GoaEditor::GoaEditor (GoaProcessor& p) : AudioProcessorEditor (&p), proc (p), bi
             if (f.existsAsFile()) proc.loadDna (f);
         });
     };
+    similarBtn.setTooltip ("Write new melodies with the same feel as the reference, without copying it.");
     similarBtn.onClick = [this] { proc.generateSimilar(); };
-    for (auto* b : { &keepBtn, &exportBtn, &exportKeptBtn, &loadDnaBtn, &similarBtn }) addAndMakeVisible (*b);
-    addAndMakeVisible (dragSrc);
+    addAndMakeVisible (loadDnaBtn);
+    addAndMakeVisible (similarBtn);
 
-    previewTgl.onClick = [this] { proc.previewOn = previewTgl.getToggleState(); };
-    followTgl.onClick = [this] { proc.followHost = followTgl.getToggleState(); };
-    gainSlider.setSliderStyle (juce::Slider::LinearHorizontal);
-    gainSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
-    gainSlider.setRange (0.0, 1.0, 0.01);
-    gainSlider.onValueChange = [this] { proc.previewGain = (float) gainSlider.getValue(); };
-    bpmSlider.setSliderStyle (juce::Slider::IncDecButtons);
-    bpmSlider.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 52, 24);
-    bpmSlider.setRange (60.0, 220.0, 1.0);
-    bpmSlider.onValueChange = [this] { proc.internalBpm = bpmSlider.getValue(); };
-    makeLabel (bpmL, "Tempo when the host is stopped");
-    for (juce::Component* c : { (juce::Component*) &previewTgl, (juce::Component*) &followTgl, (juce::Component*) &gainSlider, (juce::Component*) &bpmSlider })
-        addAndMakeVisible (*c);
-
-    makeLabel (dnaInfo, "Melody DNA: load a MIDI melody you love, then Generate similar.").setFont (font (12.5f));
-    dnaInfo.setMinimumHorizontalScale (0.8f);
+    makeLabel (dnaInfo, "Optional: load a melody you love and generate new ones with the same feel.").setFont (font (12.0f));
+    dnaInfo.setMinimumHorizontalScale (0.75f);
     makeLabel (status, "", false).setFont (font (12.5f, true));
     status.setColour (juce::Label::textColourId, cyan);
 
-    setSize (1200, 820);
+    setSize (1200, 840);
     refreshAll();
     startTimerHz (30);
 }
@@ -519,6 +546,58 @@ GoaEditor::~GoaEditor()
 {
     stopTimer();
     setLookAndFeel (nullptr);
+}
+
+void GoaEditor::rebuildMidiOutList()
+{
+    midiOutItems = proc.availableMidiOuts();
+    midiOutBox.clear (juce::dontSendNotification);
+    midiOutBox.addItem ("Off (DAW routing only)", 1);
+    midiOutBox.addItem ("Rescan ports", 2);
+    midiOutBox.addSeparator();
+    for (int i = 0; i < midiOutItems.size(); ++i) midiOutBox.addItem (midiOutItems[i], i + 3);
+    const int idx = midiOutItems.indexOf (proc.midiOutName);
+    midiOutBox.setSelectedId (proc.midiOutName.isEmpty() || idx < 0 ? 1 : idx + 3, juce::dontSendNotification);
+    if (midiOutItems.isEmpty()) midiOutBox.setTooltip ("No MIDI ports found. On Windows install the free loopMIDI, create a port, then choose Rescan ports.");
+}
+
+void GoaEditor::updateHelpTexts()
+{
+    const auto& P = proc.params;
+    const int tier = juce::jlimit (0, 3, (int) std::floor (P.density * 4.0));
+    const char* dens[4] = { "About 1-2 notes per beat. Lots of space.", "About 2-3 notes per beat, 8th-note feel.",
+                            "About 3 notes per beat, galloping 16ths.", "About 4 notes per beat, full rolling 16ths." };
+    juce::String d = dens[tier];
+    if (P.density >= .45) d << " Root pedal can appear between notes.";
+
+    const double mv = P.movement;
+    const juce::String m = mv < .25 ? "Moves by step. The motif repeats almost exactly (hypnotic)."
+                         : mv < .5  ? "Mostly steps and 3rds. The answer changes the motif's ending."
+                         : mv < .75 ? "Jumps up to a 5th. The motif is shifted and inverted."
+                                    : "Leaps up to an octave. The motif is reversed and inverted.";
+
+    int oct = 2 + (int) std::lround (P.reg * 3);
+    if (P.mode == goa::Mode::Acid) oct = std::max (1, oct - 1);
+    const juce::String root = goa::NOTE_NAMES[P.root];
+    const juce::String r = "Centred on " + root + juce::String (oct) + ", range about " + root + juce::String (oct - 1) + " to " + root + juce::String (oct + 1) + ".";
+
+    const double w = P.weird;
+    const juce::String wt = w < .08 ? "Only scale notes. Clean and in key."
+                          : w < .35 ? "Chromatic passing notes slide into the next note, off-beats only."
+                          : w < .5  ? "Plus odd leaps (tritones, 7ths, flat 9ths), pulled back into the key."
+                          : w < .72 ? "Plus octave jumps, and leaps may leave the key."
+                                    : "Alien: one scale note is bent a semitone throughout. Downbeats stay in key.";
+    const juce::String vals[4] = { juce::String ((int) std::lround (P.density * 100)), juce::String ((int) std::lround (mv * 100)),
+                                   juce::String ((int) std::lround (P.reg * 100)),
+                                   w < .08 ? "Clean" : w < .35 ? "Twisted" : w < .72 ? "Strange" : "Alien" };
+    const juce::String helps[4] = { d, m, r, wt };
+    for (int i = 0; i < 4; ++i)
+    {
+        knobs[(size_t) i].value.setText (vals[i], juce::dontSendNotification);
+        knobs[(size_t) i].help.setText (helps[i], juce::dontSendNotification);
+    }
+    modeHelp.setText (modeDescription (P.mode), juce::dontSendNotification);
+    styleHelp.setText (styleDescription (P.style), juce::dontSendNotification);
 }
 
 void GoaEditor::editStep (int i, int lane, int value)
@@ -579,18 +658,15 @@ void GoaEditor::refreshAll()
     if (chordsEd.getText().toStdString() != P.chords) chordsEd.setText (juce::String (P.chords), false);
 
     const double vals[4] = { P.density, P.movement, P.reg, P.weird };
-    for (int i = 0; i < 4; ++i)
-    {
-        knobs[(size_t) i].slider.setValue (vals[i] * 100.0, juce::dontSendNotification);
-        knobs[(size_t) i].slider.onValueChange();
-    }
+    for (int i = 0; i < 4; ++i) knobs[(size_t) i].slider.setValue (vals[i] * 100.0, juce::dontSendNotification);
+    updateHelpTexts();
     const int barVals[5] = { 1, 2, 4, 8, 16 };
     for (int i = 0; i < 5; ++i) barBtns[(size_t) i].setToggleState (P.bars == barVals[i], juce::dontSendNotification);
     const int rateVals[3] = { 16, 24, 8 };
     for (int i = 0; i < 3; ++i) rateBtns[(size_t) i].setToggleState (P.spb == rateVals[i], juce::dontSendNotification);
 
     const double amts[4] = { .1, .3, .7, 1.0 };
-    const char* hints[4] = { "One small change", "Rhythm and a few notes", "Same DNA, new melody", "Something new" };
+    const char* hints[4] = { "one small change", "rhythm and a few notes", "same motif, new melody", "something new" };
     for (int i = 0; i < 4; ++i)
     {
         const bool on = std::abs (proc.amount - amts[i]) < 1e-6;
@@ -601,10 +677,6 @@ void GoaEditor::refreshAll()
     juce::StringArray kept;
     for (int i = 0; i < 8; ++i) if (proc.keep[(size_t) i]) kept.add (juce::String::charToString (LETTERS[i]));
     mutBtn.setButtonText (kept.isEmpty() ? "Mutate " + juce::String::charToString (LETTERS[proc.sel]) : "Mutate kept (" + kept.joinIntoString (", ") + ")");
-    keepBtn.setButtonText (proc.keep[(size_t) proc.sel] ? "Kept" : "Keep");
-    keepBtn.setColour (juce::TextButton::textColourOffId, proc.keep[(size_t) proc.sel] ? mag : ink);
-    exportKeptBtn.setEnabled (! kept.isEmpty());
-    exportKeptBtn.setButtonText (kept.isEmpty() ? "Export kept..." : "Export kept (" + juce::String (kept.size()) + ")...");
     similarBtn.setEnabled (proc.dna != nullptr);
 
     if (proc.dna != nullptr)
@@ -612,8 +684,8 @@ void GoaEditor::refreshAll()
         const auto& d = *proc.dna;
         auto pc = [] (double v) { return juce::String ((int) std::lround (v * 100)) + "%"; };
         dnaInfo.setText (proc.dnaName + ": " + goa::NOTE_NAMES[d.root] + " " + juce::String (d.scale).toLowerCase() + ", " + juce::String (d.noteCount)
-                             + " notes, " + juce::String (d.bars) + "-bar phrase. Stepwise " + pc (d.stepwise) + ", syncopation " + pc (d.sync)
-                             + ", repetition " + pc (d.pedal) + ", octave moves " + pc (d.octJump) + ", chromatic " + pc (d.chromatic) + ".",
+                             + " notes. Stepwise " + pc (d.stepwise) + ", syncopation " + pc (d.sync) + ", repetition " + pc (d.pedal)
+                             + ", octave moves " + pc (d.octJump) + ".",
                          juce::dontSendNotification);
     }
     status.setText (proc.lastMessage, juce::dontSendNotification);
@@ -635,16 +707,14 @@ void GoaEditor::refreshAll()
         for (auto& n : pat.chordNames) c.add (juce::String (n));
         sub << "Over " << c.joinIntoString (" ") << ". ";
     }
-    juce::StringArray form;
-    for (auto& f : pat.form) form.add (juce::String (f));
-    sub << pat.bars << (pat.bars > 1 ? " bars" : " bar") << " at " << rateText (pat.spb) << ", form " << form.joinIntoString (" ") << ".";
+    sub << pat.bars << (pat.bars > 1 ? " bars" : " bar") << " at " << rateText (pat.spb) << ".";
     if (! pat.origin.empty()) sub << " " << juce::String (pat.origin) << ".";
     detailSub.setText (sub, juce::dontSendNotification);
 
     previewTgl.setToggleState (proc.previewOn.load(), juce::dontSendNotification);
-    followTgl.setToggleState (proc.followHost.load(), juce::dontSendNotification);
     gainSlider.setValue (proc.previewGain.load(), juce::dontSendNotification);
-    bpmSlider.setValue (proc.internalBpm.load(), juce::dontSendNotification);
+    const int outIdx = midiOutItems.indexOf (proc.midiOutName);
+    midiOutBox.setSelectedId (proc.midiOutName.isEmpty() || outIdx < 0 ? 1 : outIdx + 3, juce::dontSendNotification);
 
     if (customVisible != lastCustomVisible || chordsVisible != lastChordsVisible)
     {
@@ -670,7 +740,9 @@ void GoaEditor::timerCallback()
 {
     if (proc.modelVersion.load() != seenVersion) refreshAll();
     bigRoll.setPlayIdx (proc.playStep.load());
-    playBtn.setButtonText (proc.internalPlay.load() ? "Stop" : "Play");
+    const juce::String t = proc.hostIsPlaying.load() ? "DAW playing" : proc.internalPlay.load() ? "Stop" : "Listen";
+    if (playBtn.getButtonText() != t) playBtn.setButtonText (t);
+    playBtn.setEnabled (! proc.hostIsPlaying.load());
 }
 
 void GoaEditor::paint (juce::Graphics& g)
@@ -688,13 +760,13 @@ void GoaEditor::resized()
 {
     auto r = getLocalBounds().reduced (16);
 
-    // ---------- left column ----------
+    // ---------- left column: sound settings ----------
     auto left = r.removeFromLeft (300);
     r.removeFromLeft (16);
     leftPanel = left;
     left = left.reduced (14);
     auto gap = [&] (int h) { left.removeFromTop (h); };
-    title.setBounds (left.removeFromTop (34));
+    title.setBounds (left.removeFromTop (32));
     gap (6);
     modeL.setBounds (left.removeFromTop (18));
     {
@@ -702,7 +774,8 @@ void GoaEditor::resized()
         const int w = row.getWidth() / 4;
         for (auto& b : modeBtns) b.setBounds (row.removeFromLeft (w).reduced (1, 0));
     }
-    gap (10);
+    modeHelp.setBounds (left.removeFromTop (18));
+    gap (6);
     {
         auto lr = left.removeFromTop (18);
         rootL.setBounds (lr.removeFromLeft (74));
@@ -724,10 +797,11 @@ void GoaEditor::resized()
         }
         gap (4);
     }
-    gap (4);
+    gap (2);
     styleL.setBounds (left.removeFromTop (18));
     styleBox.setBounds (left.removeFromTop (28));
-    gap (8);
+    styleHelp.setBounds (left.removeFromTop (18));
+    gap (6);
     if (lastChordsVisible)
     {
         chordsL.setBounds (left.removeFromTop (18));
@@ -737,13 +811,11 @@ void GoaEditor::resized()
     for (auto& k : knobs)
     {
         auto hr = left.removeFromTop (18);
-        k.value.setBounds (hr.removeFromRight (70));
+        k.value.setBounds (hr.removeFromRight (80));
         k.name.setBounds (hr);
         k.slider.setBounds (left.removeFromTop (22));
-        auto er = left.removeFromTop (14);
-        k.lo.setBounds (er.removeFromLeft (er.getWidth() / 2));
-        k.hi.setBounds (er);
-        gap (6);
+        k.help.setBounds (left.removeFromTop (30));
+        gap (4);
     }
     barsL.setBounds (left.removeFromTop (18));
     {
@@ -759,15 +831,17 @@ void GoaEditor::resized()
         for (auto& b : rateBtns) b.setBounds (row.removeFromLeft (w).reduced (1, 0));
     }
 
-    // ---------- right column ----------
+    // ---------- right column: ideas, editor, actions ----------
+    gridHint.setBounds (r.removeFromTop (20));
+    r.removeFromTop (6);
     {
-        auto grid = r.removeFromTop (236);
+        auto grid = r.removeFromTop (232);
         const int cw = (grid.getWidth() - 3 * 8) / 4, ch = (grid.getHeight() - 8) / 2;
         for (int i = 0; i < 8; ++i)
             slotViews[(size_t) i]->setBounds (grid.getX() + (i % 4) * (cw + 8), grid.getY() + (i / 4) * (ch + 8), cw, ch);
     }
     r.removeFromTop (12);
-    auto detail = r.removeFromTop (330);
+    auto detail = r.removeFromTop (320);
     detailPanel = detail;
     detail = detail.reduced (12);
     {
@@ -781,52 +855,44 @@ void GoaEditor::resized()
     rollView.setBounds (detail);
     r.removeFromTop (12);
 
-    {
+    {   // main actions
         auto row = r.removeFromTop (44);
-        playBtn.setBounds (row.removeFromLeft (84));
+        playBtn.setBounds (row.removeFromLeft (110));
         row.removeFromLeft (8);
         genBtn.setBounds (row.removeFromLeft (150));
         row.removeFromLeft (8);
-        mutBtn.setBounds (row.removeFromLeft (200));
-        row.removeFromLeft (8);
+        mutBtn.setBounds (row.removeFromLeft (190));
+        row.removeFromLeft (12);
         undoBtn.setBounds (row.removeFromRight (80));
         row.removeFromRight (8);
         auto amtCol = row;
         auto amtTop = amtCol.removeFromTop (18);
-        amtL.setBounds (amtTop.removeFromLeft (70));
+        amtL.setBounds (amtTop.removeFromLeft (130));
         amtHint.setBounds (amtTop);
         const int w = amtCol.getWidth() / 4;
         for (auto& b : amtBtns) b.setBounds (amtCol.removeFromLeft (w).reduced (1, 0));
     }
     r.removeFromTop (10);
-    {
-        auto row = r.removeFromTop (34);
-        keepBtn.setBounds (row.removeFromLeft (80));
-        row.removeFromLeft (8);
-        dragSrc.setBounds (row.removeFromLeft (200));
-        row.removeFromLeft (8);
-        exportBtn.setBounds (row.removeFromLeft (120));
-        row.removeFromLeft (8);
-        exportKeptBtn.setBounds (row.removeFromLeft (140));
-        row.removeFromLeft (8);
-        similarBtn.setBounds (row.removeFromRight (140));
-        row.removeFromRight (8);
-        loadDnaBtn.setBounds (row);
+    {   // getting the notes out
+        auto row = r.removeFromTop (32);
+        dragSrc.setBounds (row.removeFromLeft (190));
+        row.removeFromLeft (16);
+        midiOutL.setBounds (row.removeFromLeft (62));
+        midiOutBox.setBounds (row.removeFromLeft (250));
+        row.removeFromLeft (16);
+        previewTgl.setBounds (row.removeFromLeft (120));
+        gainSlider.setBounds (row.removeFromLeft (130));
     }
     r.removeFromTop (10);
-    {
-        auto row = r.removeFromTop (28);
-        previewTgl.setBounds (row.removeFromLeft (130));
-        gainSlider.setBounds (row.removeFromLeft (120));
-        row.removeFromLeft (16);
-        followTgl.setBounds (row.removeFromLeft (180));
-        bpmSlider.setBounds (row.removeFromRight (110));
-        row.removeFromRight (6);
-        bpmL.setBounds (row);
-        bpmL.setJustificationType (juce::Justification::centredRight);
+    {   // melody DNA (optional)
+        auto row = r.removeFromTop (32);
+        loadDnaBtn.setBounds (row.removeFromLeft (170));
+        row.removeFromLeft (8);
+        similarBtn.setBounds (row.removeFromLeft (150));
+        row.removeFromLeft (12);
+        dnaInfo.setBounds (row);
     }
-    r.removeFromTop (8);
-    dnaInfo.setBounds (r.removeFromTop (20));
+    r.removeFromTop (6);
     status.setBounds (r.removeFromTop (20));
     layoutRoll();
 }

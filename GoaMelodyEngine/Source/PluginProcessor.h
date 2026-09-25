@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_audio_devices/juce_audio_devices.h>
 #include <array>
 #include <atomic>
 #include <memory>
@@ -69,12 +70,20 @@ public:
     std::vector<uint8_t> midiFor (int slot) const;
     juce::String fileBaseFor (int slot) const;
     int keptCount() const;
+    void startListening(); // audition the selected melody while the DAW is stopped
+
+    // Direct MIDI out to a port (loopMIDI on Windows, IAC / virtual port on Mac).
+    // Needed for Ableton, which does not route MIDI coming out of VST3 plugins to other tracks.
+    static juce::String virtualPortName() { return "Goa Melody Engine (virtual port)"; }
+    juce::StringArray availableMidiOuts() const;
+    void setMidiOut (const juce::String& name); // empty = off
+    juce::String midiOutName;
 
     std::atomic<int> modelVersion { 0 }; // editor polls this to know when to refresh
     juce::String lastMessage;
 
     // ---------- shared with audio thread ----------
-    std::atomic<bool> internalPlay { false }, previewOn { true }, followHost { true };
+    std::atomic<bool> internalPlay { false }, previewOn { true }, followHost { true }, hostIsPlaying { false };
     std::atomic<float> previewGain { 0.5f };
     std::atomic<double> internalBpm { 145.0 }, hostBpm { 0.0 };
     std::atomic<int> playStep { -1 };
@@ -102,6 +111,9 @@ private:
     bool wasRunning = false, prevSlide = false, wasInternal = false;
     int prevNote = -1;
     void flushAll (juce::MidiBuffer&, int sample);
+    void sendExternal (const juce::MidiBuffer&);
+    juce::SpinLock outLock;
+    std::unique_ptr<juce::MidiOutput> extOut;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GoaProcessor)
 };

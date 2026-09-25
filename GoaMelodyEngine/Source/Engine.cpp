@@ -199,24 +199,56 @@ int chordOff (const Chord& ch, const Params& p, const std::vector<int>& sc)
     return std::abs (idx - n) < idx ? idx - n : idx;
 }
 
-BoolVec makeRhythm (int spb, const Params& p, const StyleProfile& st, Rng& R)
+// Rhythm is built from curated one-beat cells (real Goa/psy grooves), arranged b1 b2 b1 b4
+// so the groove repeats inside the bar instead of being random per step.
+BoolVec cellFromString (const char* c)
+{
+    BoolVec v;
+    for (const char* p = c; *p != 0; ++p) v.push_back (*p == '1');
+    return v;
+}
+const std::vector<const char*>& beatCells (int spbeat, int tier, const std::string& cells)
+{
+    static const std::vector<std::vector<const char*>> s16 { { "1000", "1010", "1001", "1010" },
+                                                             { "1010", "1011", "1001", "1101", "1010" },
+                                                             { "1011", "1101", "1111", "1110", "1011" },
+                                                             { "1111", "1111", "1011", "1101" } };
+    static const std::vector<std::vector<const char*>> sync16 { { "1000", "0010", "1001" },
+                                                                { "1010", "0110", "1001", "0011" },
+                                                                { "1011", "0111", "1101", "0110" },
+                                                                { "1111", "0111", "1011", "1101" } };
+    static const std::vector<std::vector<const char*>> acid16 { { "1010", "1001", "1000" },
+                                                                { "1010", "1011", "1101", "0110" },
+                                                                { "1011", "1101", "1110", "0111", "1010" },
+                                                                { "1111", "1011", "1101", "1110" } };
+    static const std::vector<std::vector<const char*>> t24 { { "100000", "100100" },
+                                                             { "100100", "101100", "100110" },
+                                                             { "110110", "101101", "111011" },
+                                                             { "111111", "110111", "111111" } };
+    static const std::vector<std::vector<const char*>> e8 { { "10" }, { "10", "11" }, { "11", "10", "11" }, { "11" } };
+    tier = clampi (tier, 0, 3);
+    if (spbeat == 6) return t24[(size_t) tier];
+    if (spbeat == 2) return e8[(size_t) tier];
+    if (cells == "sync") return sync16[(size_t) tier];
+    if (cells == "acid") return acid16[(size_t) tier];
+    return s16[(size_t) tier];
+}
+BoolVec makeBarRhythm (int spb, const Params& p, const StyleProfile& st, Rng& R)
 {
     const int spbeat = spb / 4;
-    const double d = p.density;
-    BoolVec on;
-    for (int i = 0; i < spb; ++i)
-    {
-        const bool strong = i % spbeat == 0;
-        double pr;
-        if (st.cells == "acid") pr = .25 + .6 * d + (strong ? .25 : 0);
-        else if (st.cells == "sync") pr = .2 + .6 * d + (strong ? -.2 * st.sync : .15);
-        else if (st.cells == "long") pr = .08 + .42 * d + (strong ? .45 : 0);
-        else pr = .3 + .68 * d + (strong ? .3 : 0);
-        pr -= st.rests * .5;
-        on.push_back (R.chance (clampd (pr, .05, .98)));
-    }
-    on[0] = true;
-    return on;
+    int tier = clampi ((int) std::floor (p.density * 4.0), 0, 3);
+    if (st.cells == "long") tier = std::max (0, tier - 1);
+    auto cellAt = [&] {
+        int t = tier;
+        if (R.chance (.2)) t += R.chance (.5) ? 1 : -1;
+        return cellFromString (pickRef (R, beatCells (spbeat, t, st.cells)));
+    };
+    const BoolVec b1 = cellAt(), b2 = cellAt();
+    const BoolVec b4 = R.chance (.5) ? b2 : cellAt();
+    BoolVec bar;
+    for (const BoolVec* c : { &b1, &b2, &b1, &b4 }) bar.insert (bar.end(), c->begin(), c->end());
+    if (std::none_of (bar.begin(), bar.end(), [] (bool b) { return b; })) bar[0] = true;
+    return bar;
 }
 BoolVec rhythmVariant (const BoolVec& on, double amt, int spbeat, Rng& R)
 {
@@ -229,65 +261,55 @@ BoolVec rhythmVariant (const BoolVec& on, double amt, int spbeat, Rng& R)
 
 std::vector<int> makeMotif (const Params& p, const StyleProfile& st, int L, Rng& R)
 {
-    int cur = pickI (R, { 0, 0, 0, 0, 2, 4, -3 });
+    const double mv = p.movement;
+    int cur = pickI (R, { 0, 0, 0, 2, 4 });
     std::vector<int> m { cur };
+    int lastIv = 0;
     for (int k = 1; k < L; ++k)
     {
         int iv;
-        if (R.chance (st.rep * (1 - p.movement * .7))) iv = 0;
-        else if (R.chance (st.step * (1 - p.movement * .5))) iv = pickI (R, { -1, 1 });
+        if (std::abs (lastIv) >= 3 && R.chance (.7)) iv = (lastIv > 0 ? -1 : 1) * pickI (R, { 1, 1, 2 }); // fill the gap after a leap
+        else if (R.chance (st.rep * (1 - mv * .7))) iv = 0;
+        else if (R.chance (.55 + .35 * (1 - mv))) iv = pickI (R, { -1, 1 });
         else
         {
-            const int mx = std::max (2, (int) std::lround (st.leapMax * (.5 + p.movement * .8) + p.weird * 2));
+            const int mx = std::max (2, 2 + (int) std::lround (mv * (st.leapMax - 1) + p.weird * 2));
             iv = R.ri (2, mx) * pickI (R, { -1, 1 });
         }
-        cur = clampi (cur + iv, -5, 11);
+        cur = clampi (cur + iv, -3, 9);
         m.push_back (cur);
+        lastIv = iv;
     }
     if (std::all_of (m.begin(), m.end(), [&] (int x) { return x == m[0]; })) m.back() += pickI (R, { 2, -1, 4 });
     return m;
 }
-std::vector<int> develop (const std::vector<int>& m, double mv, int n, Rng& R)
+int nearestStable (int deg, int n)
 {
-    const std::vector<std::pair<int, double>> w { { 0, 1.2 - mv }, { 1, 1 - mv * .5 }, { 2, .4 + mv * .6 },
-                                                  { 3, mv * .9 }, { 4, .2 + mv * .6 }, { 5, mv * .5 }, { 6, mv * .4 } };
-    double t = 0;
-    for (auto& e : w) t += std::max (0.0, e.second);
-    double r = R.next() * t;
-    int kind = 0;
-    for (auto& e : w)
-    {
-        r -= std::max (0.0, e.second);
-        if (r <= 0) { kind = e.first; break; }
-    }
-    std::vector<int> o = m;
-    switch (kind)
-    {
-        case 1: {
-            const int k = std::max (1, (int) m.size() / 2);
-            for (size_t i = m.size() - (size_t) k; i < m.size(); ++i)
-                if (R.chance (.7)) o[i] += pickI (R, { -2, -1, 1, 2 });
-            break;
+    // nearest degree on the tonic triad (degrees 0, 2, 4 of the scale), any octave
+    int best = deg, bd = 99;
+    for (int o = -2; o <= 2; ++o)
+        for (int d : { 0, 2, 4 })
+        {
+            const int c = o * n + std::min (d, n - 1);
+            if (std::abs (c - deg) < bd) { bd = std::abs (c - deg); best = c; }
         }
-        case 2: { const int s = pickI (R, { 1, 2, -1, -2, 3, 4 }); for (auto& x : o) x += s; break; }
-        case 3: for (auto& x : o) x = 2 * m[0] - x; break;
-        case 4: std::reverse (o.begin(), o.end()); break;
-        case 5: { const int s = R.chance (.7) ? n : -n; for (auto& x : o) x += s; break; }
-        case 6: for (auto& x : o) x = m[0] + (x - m[0]) * 2; break;
-        default: break;
-    }
-    return o;
+    return best;
 }
-std::vector<int> buildSeq (const std::vector<int>& motif, int count, double mv, int n, Rng& R)
+std::vector<int> answerOf (const std::vector<int>& m, double mv, int n, Rng& R)
 {
-    std::vector<int> seq = motif;
-    int g = 0;
-    while ((int) seq.size() < count && g++ < 200)
+    std::vector<int> r = m;
+    if (mv < .3 && R.chance (.35)) return r; // exact repeat, hypnotic
+    const double t = R.next();
+    if (t < .55 || r.size() < 3)
     {
-        auto d = develop (motif, mv, n, R);
-        seq.insert (seq.end(), d.begin(), d.end());
+        const size_t k = std::max<size_t> (1, r.size() / 2);
+        for (size_t i = r.size() - k; i < r.size(); ++i) r[i] += pickI (R, { -2, -1, 1, 2 });
     }
-    return seq;
+    else if (t < .8) { const int s = pickI (R, { 1, 2, -1, -2 }); for (auto& x : r) x += s; }
+    else if (t < .92 && mv > .45) { const int f = r[0]; for (auto& x : r) x = 2 * f - x; }
+    else std::reverse (r.begin(), r.end());
+    r.back() = nearestStable (r.back(), n); // an answer comes to rest on a chord tone
+    return r;
 }
 std::vector<int> varyMotif (const std::vector<int>& m, Rng& R)
 {
@@ -316,98 +338,87 @@ std::vector<std::string> formFor (int bars)
 struct Ev { bool on = false; int deg = 0; bool pedal = false, hold = false; };
 using Bar = std::vector<Ev>;
 
-std::vector<Ev> genMelodic (const Params& p, const StyleProfile& st, const std::vector<int>& motif, int spb, int bars,
-                            const std::vector<std::string>& form, int n, const std::vector<BoolVec>* poolIn, Rng& R)
+std::vector<Ev> genMelodic (const Params& p, const StyleProfile& st, const std::vector<int>* motifIn, std::vector<int>& motifOut,
+                            int spb, int bars, const std::vector<std::string>& form, int n, const std::vector<BoolVec>* poolIn, Rng& R)
 {
-    const int spbeat = spb / 4;
+    const int spbeat = spb / 4, half = spb / 2;
     const double mv = p.movement;
-    const bool pedOn = R.chance (st.pedal * (1 - .35 * mv));
+    const bool pedOn = p.density >= .45 && R.chance (st.pedal * (1 - .35 * mv));
     const int pedDeg = R.chance (.6) ? 0 : -n;
     const int parity = R.chance (.5) ? 0 : 1;
     const std::vector<BoolVec>* pool = (poolIn != nullptr && spb == 16 && ! poolIn->empty()) ? poolIn : nullptr;
-    auto isPed = [&] (int i) { return pedOn && i % 2 == parity; };
-    const BoolVec baseR = pool != nullptr ? rhythmVariant (pickRef (R, *pool), .08, spbeat, R) : makeRhythm (spb, p, st, R);
+    const BoolVec baseR = pool != nullptr ? rhythmVariant (pickRef (R, *pool), .06, spbeat, R) : makeBarRhythm (spb, p, st, R);
 
-    auto countMel = [&] (const BoolVec& r) { int c = 0; for (int i = 0; i < (int) r.size(); ++i) if (r[(size_t) i] && ! isPed (i)) ++c; return c; };
-    auto fill = [&] (const BoolVec& r, const std::vector<int>& seq) {
+    // melodic (non-pedal) notes in the first half bar decide the motif length
+    auto melIn = [&] (const BoolVec& r, int len) {
+        int c = 0, on = 0;
+        for (int i = 0; i < len; ++i) if (r[(size_t) i]) { if (! (pedOn && on % 2 == parity)) ++c; ++on; }
+        return c;
+    };
+    // sparse grooves: the motif spans the whole bar and is answered in the next bar
+    const int unit = melIn (baseR, half) < 3 ? spb : half;
+    std::vector<int> motif;
+    if (motifIn != nullptr && ! motifIn->empty()) motif = *motifIn;
+    else motif = makeMotif (p, st, clampi (melIn (baseR, unit), 2, std::max (3, st.motifMax) + (unit == spb ? 2 : 0)), R);
+    motifOut = motif;
+
+    // the motif restarts every half bar: call in the first half, answer in the second
+    auto fillBar = [&] (const BoolVec& r, const std::vector<int>& h0, const std::vector<int>& h1) {
         Bar b ((size_t) spb);
-        int k = 0;
-        for (int i = 0; i < spb; ++i)
+        int onIdx = 0;
+        for (int h = 0; h < spb / unit; ++h)
         {
-            if (! r[(size_t) i]) continue;
-            b[(size_t) i].on = true;
-            if (isPed (i)) { b[(size_t) i].deg = pedDeg; b[(size_t) i].pedal = true; }
-            else b[(size_t) i].deg = seq[(size_t) (k++ % (int) seq.size())];
+            const auto& inst = h == 0 ? h0 : h1;
+            int k = 0;
+            for (int i = h * unit; i < (h + 1) * unit; ++i)
+            {
+                if (! r[(size_t) i]) continue;
+                b[(size_t) i].on = true;
+                if (pedOn && onIdx % 2 == parity) { b[(size_t) i].deg = pedDeg; b[(size_t) i].pedal = true; }
+                else b[(size_t) i].deg = inst[(size_t) (k++ % (int) inst.size())];
+                ++onIdx;
+            }
         }
         return b;
     };
-    auto melIdx = [&] (const Bar& c) { std::vector<int> r; for (int i = 0; i < spb; ++i) if (c[(size_t) i].on && ! c[(size_t) i].pedal) r.push_back (i); return r; };
-    auto endVar = [&] (Bar c) {
-        auto mi = melIdx (c);
-        const int k = std::max (1, (int) std::ceil (motif.size() / 2.0));
-        for (int j = std::max (0, (int) mi.size() - k); j < (int) mi.size(); ++j)
-            if (R.chance (.75)) c[(size_t) mi[(size_t) j]].deg += pickI (R, { -2, -1, 1, 2, 3 });
-        return c;
-    };
+    auto shifted = [] (std::vector<int> v, int s) { for (auto& x : v) x += s; return v; };
 
+    const auto M1 = answerOf (motif, mv, n, R);
+    const int seqStep = pickI (R, { 2, 3, -2, 4, 2 });
     std::map<std::string, Bar> cache;
     std::function<const Bar& (const std::string&)> get;
     std::function<Bar (const std::string&)> make = [&] (const std::string& l) -> Bar {
         if (l == "A2")
         {
-            Bar c = endVar (get ("A"));
-            if (R.chance (.3 + mv * .3))
-            {
-                const int i = R.ri (1, spb - 1);
-                if (i % spbeat != 0)
-                {
-                    if (c[(size_t) i].on) c[(size_t) i] = Ev {};
-                    else
-                    {
-                        int d = 0;
-                        for (int j = i - 1; j >= 0; --j) if (c[(size_t) j].on) { d = c[(size_t) j].deg; break; }
-                        c[(size_t) i].on = true;
-                        c[(size_t) i].deg = d + pickI (R, { -1, 1 });
-                    }
-                }
-            }
-            return c;
+            BoolVec r = baseR;
+            if (R.chance (.3)) { const int i = R.ri (1, spb - 1); if (i % spbeat != 0) r[(size_t) i] = ! r[(size_t) i]; }
+            const auto ans = answerOf (motif, mv, n, R);
+            return unit == spb ? fillBar (r, ans, ans) : fillBar (r, motif, ans);
         }
-        if (l == "A3")
+        if (l == "A3") { const int s = pickI (R, { n, 2, -2 }); return fillBar (baseR, shifted (motif, s), shifted (M1, s)); }
+        if (l == "B" || l == "B2")
         {
-            Bar c = get ("A");
-            const int s = pickI (R, { n, n, 2, -2, 4 });
-            for (int i = spb / 2; i < spb; ++i) if (c[(size_t) i].on && ! c[(size_t) i].pedal) c[(size_t) i].deg += s;
-            return c;
+            const BoolVec r = pool != nullptr && pool->size() > 1 ? rhythmVariant (pickRef (R, *pool), .06, spbeat, R)
+                                                                 : (R.chance (.5) ? baseR : makeBarRhythm (spb, p, st, R));
+            const auto T = shifted (motif, seqStep);
+            return fillBar (r, T, answerOf (T, mv, n, R));
         }
-        if (l == "B")
-        {
-            const BoolVec r = (pool != nullptr && pool->size() > 1) ? rhythmVariant (pickRef (R, *pool), .1, spbeat, R)
-                                                                   : rhythmVariant (baseR, .1 + mv * .25, spbeat, R);
-            const double t = R.next();
-            std::vector<int> b = motif;
-            if (t < .5) { for (auto& x : b) x += pickI (R, { 2, 3, -2, 4 }); }
-            else if (t < .75) { for (auto& x : b) x = 2 * motif[0] - x; }
-            else { std::reverse (b.begin(), b.end()); for (auto& x : b) x += pickI (R, { 1, 2 }); }
-            return fill (r, buildSeq (b, countMel (r), mv, n, R));
-        }
-        if (l == "B2") return endVar (get ("B"));
         if (l == "C")
         {
             Bar c = get ("A2");
-            auto mi = melIdx (c);
-            if (! mi.empty())
+            int last = -1;
+            for (int i = 0; i < spb; ++i) if (c[(size_t) i].on && ! c[(size_t) i].pedal) last = i;
+            if (last >= 0)
             {
-                int t = -1;
-                for (int i : mi) if (i >= spb - spbeat * 2) { t = i; break; }
-                if (t < 0) t = mi.back();
-                c[(size_t) t].deg = pickI (R, { 0, 0, n, 4, -n });
+                int t = last;
+                for (int i = spb - spbeat * 2; i < spb; ++i) if (c[(size_t) i].on && ! c[(size_t) i].pedal) { t = i; break; }
+                c[(size_t) t].deg = pickI (R, { 0, 0, n, 4 });
                 c[(size_t) t].hold = true;
                 for (int i = t + 1; i < spb; ++i) c[(size_t) i] = Ev {};
             }
             return c;
         }
-        return fill (baseR, buildSeq (motif, countMel (baseR), mv, n, R));
+        return fillBar (baseR, motif, M1);
     };
     get = [&] (const std::string& l) -> const Bar& {
         auto it = cache.find (l);
@@ -526,14 +537,14 @@ void weirdify (std::vector<Step>& steps, const Params& p, const PcSet& set, int 
         const Step& next = steps[(size_t) ons[(size_t) ((j + 1) % N)]];
         const Step& prev = steps[(size_t) ons[(size_t) ((j - 1 + N) % N)]];
         const double r = R.next();
-        if (! strong && r < w * .3) s.note = next.note + pickI (R, { -1, 1 });
-        else if (! strong && r < w * .45)
+        if (! strong && r < w * .25) s.note = next.note + pickI (R, { -1, 1 });
+        else if (! strong && w > .35 && r < w * .38)
         {
             int m = prev.note + pickI (R, { 6, -6, 11, -11, 13, -13, 10 });
             if (w < .55) m = snapToScale (m, set);
             s.note = m;
         }
-        else if (r < w * .52) s.note += pickI (R, { 12, -12 });
+        else if (w > .5 && r < w * .44) s.note += pickI (R, { 12, -12 });
     }
     if (w > .72)
     {
@@ -769,7 +780,7 @@ Pattern generate (const Params& pIn, uint32_t seed, const std::vector<int>* moti
     {
         st.slide = std::max (st.slide, .25); st.acc = std::max (st.acc, .3); st.octJump = std::max (st.octJump, .2);
         if (st.cells != "sync") st.cells = "acid";
-        st.motifMin = 3; st.motifMax = 4; st.pedal = std::max (st.pedal, .35);
+        st.motifMin = 3; st.motifMax = 4; st.pedal = std::min (st.pedal, .3);
     }
     const auto sc = scaleOf (p);
     const PcSet set = pcSetOf (p);
@@ -790,13 +801,13 @@ Pattern generate (const Params& pIn, uint32_t seed, const std::vector<int>* moti
         return imod ((int) std::floor (i / per), nc);
     };
 
-    const std::vector<int> motif = motifIn != nullptr && ! motifIn->empty() ? *motifIn
-                                                                           : makeMotif (p, st, R.ri (st.motifMin, st.motifMax), R);
+    std::vector<int> motif;
     std::vector<Step> steps;
     if (p.mode == Mode::Arp) steps = genArp (p, st, spb, bars, form, chords, chordIdx, set, base, R);
     else
     {
-        const auto evs = genMelodic (p, st, motif, spb, bars, form, n, pool, R);
+        const auto evs = genMelodic (p, st, motifIn, motif, spb, bars, form, n, pool, R);
+        const PcSet tonic = chordPcs (tonicChord (p, sc));
         steps.resize ((size_t) total);
         for (int i = 0; i < total; ++i)
         {
@@ -818,7 +829,12 @@ Pattern generate (const Params& pIn, uint32_t seed, const std::vector<int>* moti
                     if (strong || (avoid && R.chance (.7))) s.note = nearestChordTone (s.note, pcs);
                 }
             }
-            else s.note = degToMidi (e.deg, sc, base);
+            else
+            {
+                s.note = degToMidi (e.deg, sc, base);
+                const bool strong = i % spbeat == 0 || s.hold;
+                if (strong && ! s.pedal && R.chance (.9 - .4 * p.movement)) s.note = nearestChordTone (s.note, tonic);
+            }
             steps[(size_t) i] = s;
         }
     }
@@ -845,14 +861,54 @@ Pattern generate (const Params& pIn, uint32_t seed, const std::vector<int>* moti
     return out;
 }
 
+double musicality (const Pattern& pat)
+{
+    std::vector<int> mel;
+    for (auto& s : pat.steps) if (s.on && ! s.pedal) mel.push_back (s.note);
+    if (mel.size() < 3) return -10.0;
+    double step = 0, leap = 0, sum = 0;
+    int lo = 127, hi = 0;
+    for (size_t i = 1; i < mel.size(); ++i)
+    {
+        const int a = std::abs (mel[i] - mel[i - 1]);
+        sum += a;
+        if (a >= 1 && a <= 4) ++step;
+        if (a > 7) ++leap;
+    }
+    for (int m : mel) { lo = std::min (lo, m); hi = std::max (hi, m); }
+    const double N = (double) (mel.size() - 1);
+    std::set<int> distinct (mel.begin(), mel.end());
+    const double calm = 1.0 - pat.params.weird; // weirdness is allowed to break these rules
+    double score = step / N * 2.0 - leap / N * 3.0 * calm - std::max (0, hi - lo - 14) * .15 * calm - std::abs (sum / N - 2.8) * .3;
+    if (distinct.size() <= 2) score -= 1.0;
+    if (distinct.size() >= 3 && distinct.size() <= 7) score += .5;
+    return score;
+}
+
+Pattern generateBest (const Params& p, uint32_t seed, int tries, const std::vector<int>* motif, const StyleProfile* dna,
+                      const std::vector<std::vector<bool>>* pool)
+{
+    Rng R (seed);
+    if (p.mode == Mode::Arp) tries = 1;
+    Pattern best;
+    double bestScore = -1e9;
+    for (int t = 0; t < std::max (1, tries); ++t)
+    {
+        Pattern c = generate (p, R.u32(), motif, dna, pool);
+        const double sc = musicality (c);
+        if (t == 0 || sc > bestScore) { bestScore = sc; best = std::move (c); }
+    }
+    return best;
+}
+
 Pattern mutate (const Pattern& src, double amt, const Params& current, uint32_t seed)
 {
     Rng R (seed);
-    if (amt >= 1.0) return generate (current, R.u32());
+    if (amt >= 1.0) return generateBest (current, R.u32());
     if (amt >= .7)
     {
         const auto m = varyMotif (src.motif, R);
-        return generate (src.params, R.u32(), &m, src.hasDnaStyle ? &src.dnaStyle : nullptr,
+        return generateBest (src.params, R.u32(), 4, &m, src.hasDnaStyle ? &src.dnaStyle : nullptr,
                          src.rhythmPool.empty() ? nullptr : &src.rhythmPool);
     }
     return mutateLocal (src, amt, R);

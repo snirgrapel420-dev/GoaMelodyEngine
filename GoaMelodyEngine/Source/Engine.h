@@ -83,6 +83,12 @@ Pattern generate (const Params&, uint32_t seed,
                   const std::vector<int>* motif = nullptr,
                   const StyleProfile* dnaStyle = nullptr,
                   const std::vector<std::vector<bool>>* rhythmPool = nullptr);
+// Generates several candidates and keeps the most singable one (steps, few wild leaps, compact range).
+Pattern generateBest (const Params&, uint32_t seed, int tries = 6,
+                      const std::vector<int>* motif = nullptr,
+                      const StyleProfile* dnaStyle = nullptr,
+                      const std::vector<std::vector<bool>>* rhythmPool = nullptr);
+double musicality (const Pattern&);
 Pattern mutate (const Pattern& src, double amount, const Params& current, uint32_t seed);
 void fixSlides (std::vector<Step>&);
 

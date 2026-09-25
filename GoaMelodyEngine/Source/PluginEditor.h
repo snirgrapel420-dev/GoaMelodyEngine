@@ -15,7 +15,7 @@ public:
     GoaLookAndFeel();
 };
 
-class SlotView : public juce::Component
+class SlotView : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     SlotView (GoaProcessor& p, int index) : proc (p), idx (index) {}
@@ -29,7 +29,7 @@ private:
     int idx;
 };
 
-class BigRoll : public juce::Component
+class BigRoll : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit BigRoll (GoaProcessor& p) : proc (p) {}
@@ -44,7 +44,7 @@ private:
     int playIdx = -1;
 };
 
-class MidiDragSource : public juce::Component
+class MidiDragSource : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit MidiDragSource (GoaProcessor& p) : proc (p) { setMouseCursor (juce::MouseCursor::DraggingHandCursor); }
@@ -69,6 +69,7 @@ private:
     void timerCallback() override;
     void refreshAll();
     void layoutRoll();
+    void updateHelpTexts();
     void editStep (int step, int lane, int value);
     juce::Label& makeLabel (juce::Label&, const juce::String&, bool dimText = true);
 
@@ -76,18 +77,19 @@ private:
     GoaLookAndFeel lnf;
 
     // left column
-    juce::Label title, modeL, rootL, scaleL, scaleNotes, styleL, chordsL, barsL, rateL;
+    juce::Label title, modeL, modeHelp, rootL, scaleL, scaleNotes, styleL, styleHelp, chordsL, barsL, rateL;
     std::array<juce::TextButton, 4> modeBtns;
     juce::ComboBox rootBox, scaleBox, styleBox;
     std::vector<std::string> scaleIds;
     std::array<juce::TextButton, 12> customBtns;
     juce::TextEditor chordsEd;
-    struct Knob { juce::Label name, value, lo, hi; juce::Slider slider; };
+    struct Knob { juce::Label name, value, help; juce::Slider slider; };
     std::array<Knob, 4> knobs;
     std::array<juce::TextButton, 5> barBtns;
     std::array<juce::TextButton, 3> rateBtns;
 
     // right column
+    juce::Label gridHint;
     std::array<std::unique_ptr<SlotView>, 8> slotViews;
     juce::Label bigLetter, detailTitle, detailSub;
     BigRoll bigRoll;
@@ -95,12 +97,16 @@ private:
     juce::TextButton playBtn { "Play" }, genBtn { "Generate" }, mutBtn { "Mutate" }, undoBtn { "Undo" };
     std::array<juce::TextButton, 4> amtBtns;
     juce::Label amtL, amtHint;
-    juce::TextButton keepBtn { "Keep" }, exportBtn { "Export MIDI..." }, exportKeptBtn { "Export kept..." },
-        loadDnaBtn { "Load DNA MIDI..." }, similarBtn { "Generate similar" };
+    juce::TextButton loadDnaBtn { "Load reference MIDI..." }, similarBtn { "Generate similar" };
     MidiDragSource dragSrc;
-    juce::ToggleButton previewTgl { "Preview sound" }, followTgl { "Follow host transport" };
-    juce::Slider gainSlider, bpmSlider;
-    juce::Label bpmL, dnaInfo, status;
+    juce::Label midiOutL;
+    juce::ComboBox midiOutBox;
+    juce::StringArray midiOutItems;
+    void rebuildMidiOutList();
+    juce::ToggleButton previewTgl { "Built-in sound" };
+    juce::Slider gainSlider;
+    juce::Label dnaInfo, status;
+    juce::TooltipWindow tooltips { this, 500 };
     std::unique_ptr<juce::FileChooser> chooser;
 
     juce::Rectangle<int> leftPanel, detailPanel;
