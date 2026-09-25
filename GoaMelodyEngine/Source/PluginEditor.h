@@ -69,7 +69,7 @@ private:
     void timerCallback() override;
     void refreshAll();
     void layoutRoll();
-    void editStep (int step, int lane);
+    void editStep (int step, int lane, int value);
     juce::Label& makeLabel (juce::Label&, const juce::String&, bool dimText = true);
 
     GoaProcessor& proc;
