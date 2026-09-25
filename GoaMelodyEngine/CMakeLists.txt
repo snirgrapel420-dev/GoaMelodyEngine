@@ -15,7 +15,7 @@ FetchContent_Declare(JUCE
 FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(GoaMelodyEngine
-  COMPANY_NAME "GoaLab"
+  COMPANY_NAME "Dali Audio"
   PRODUCT_NAME "Goa Melody Engine"
   PLUGIN_MANUFACTURER_CODE Goal
   PLUGIN_CODE GmE1
